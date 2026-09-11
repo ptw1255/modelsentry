@@ -144,6 +144,25 @@ def test_n_bins_must_be_positive() -> None:
         profile(df, preds, n_bins=0)
 
 
+def test_integer_predictions_can_be_explicitly_profiled_as_classification() -> None:
+    df = pd.DataFrame({"a": [1, 2, 3, 4]})
+    result = profile(
+        df,
+        np.array([0, 1, 0, 1]),
+        prediction_task_type="classification",
+    )
+
+    assert result.prediction_profile.task_type == "classification"
+    assert result.prediction_profile.class_counts == {"0": 2, "1": 2}
+    assert result.prediction_profile.distribution is None
+
+
+def test_invalid_prediction_task_type_is_rejected() -> None:
+    df = pd.DataFrame({"a": [1, 2]})
+    with pytest.raises(ValueError, match="prediction_task_type"):
+        profile(df, np.array([0, 1]), prediction_task_type="ranking")  # type: ignore[arg-type]
+
+
 def test_all_null_numeric_column() -> None:
     df = pd.DataFrame({"x": [np.nan] * 5, "y": [1.0, 2.0, 3.0, 4.0, 5.0]})
     preds = np.zeros(5)

@@ -17,7 +17,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Literal, TypeVar
 
 import numpy as np
 import pandas as pd
@@ -42,6 +42,7 @@ class _SdkConfig:
     logger: logging.Logger
     storage_path: Path | None
     telemetry_include_model_id: bool
+    prediction_task_type: Literal["regression", "classification"] | None
 
 
 @dataclass
@@ -69,6 +70,7 @@ def init(
     storage_path: Path | str | None = None,
     logger: logging.Logger | None = None,
     telemetry_include_model_id: bool = False,
+    prediction_task_type: Literal["regression", "classification"] | None = None,
 ) -> None:
     """Initialize the ModelSentry SDK.
 
@@ -88,6 +90,8 @@ def init(
         logger: Custom logger; defaults to logging.getLogger("modelsentry").
         telemetry_include_model_id: Explicitly include model_id on spans. Model
             IDs are never emitted as metric attributes. Defaults to False.
+        prediction_task_type: Explicit prediction semantics. Set to
+            ``classification`` when the wrapped model returns integer labels.
     """
     if profile_window < 1:
         raise ValueError(f"profile_window must be >= 1, got {profile_window}")
@@ -111,6 +115,7 @@ def init(
         logger=log,
         storage_path=resolved_path,
         telemetry_include_model_id=telemetry_include_model_id,
+        prediction_task_type=prediction_task_type,
     )
     _executor = ThreadPoolExecutor(
         max_workers=1, thread_name_prefix="modelsentry-worker"
@@ -375,7 +380,12 @@ def _compute_and_dispatch(batch: list[_BufferedCall], model_id: str) -> None:
                 if baseline is not None
                 else None
             )
-            prof = profile(df, preds, baseline_edges=baseline_edges)
+            prof = profile(
+                df,
+                preds,
+                baseline_edges=baseline_edges,
+                prediction_task_type=config.prediction_task_type,
+            )
             _latest_profiles[model_id] = prof
             _telemetry.set_attributes(
                 current,

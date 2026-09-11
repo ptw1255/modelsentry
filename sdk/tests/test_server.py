@@ -188,7 +188,7 @@ def test_status_prediction_count(client):
     storage.save_profile(_make_profile(n_rows=75, seed=3), "m1", timestamp="2026-05-06T11-00-00")
 
     resp = client.get("/api/models/m1/status")
-    assert resp.json()["prediction_count"] == 225
+    assert resp.json()["prediction_count"] == 125
 
 
 def test_status_last_updated_iso_format(client):

@@ -98,6 +98,18 @@ ms.init(
 )
 ```
 
+### Integer classification labels
+
+Numeric predictions default to regression. Set the task explicitly when a
+classifier returns integer labels such as `0` and `1`:
+
+```python
+ms.init(
+    model_id="churn-v3",
+    prediction_task_type="classification",
+)
+```
+
 ---
 
 ## Dashboard

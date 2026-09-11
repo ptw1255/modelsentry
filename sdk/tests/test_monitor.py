@@ -243,6 +243,29 @@ def test_2d_predictions_argmax(sdk):
     assert pp.numeric_stats.max == 1.0
 
 
+def test_integer_predictions_respect_explicit_classification_task(small_df):
+    captured = []
+    try:
+        ms.init(
+            model_id="classifier",
+            profile_window=1,
+            prediction_task_type="classification",
+            profile_handler=lambda profile, model_id: captured.append(profile),
+        )
+
+        @ms.monitor()
+        def predict(X):
+            return np.array([0, 1])
+
+        predict(small_df)
+        flush()
+
+        assert captured[0].prediction_profile.task_type == "classification"
+        assert captured[0].prediction_profile.class_counts == {"0": 1, "1": 1}
+    finally:
+        shutdown()
+
+
 # ---------------------------------------------------------------------------
 # Error isolation
 # ---------------------------------------------------------------------------
