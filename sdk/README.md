@@ -114,6 +114,69 @@ The local dashboard at `localhost:8080` shows:
 
 ---
 
+## OpenTelemetry (optional)
+
+Install the vendor-neutral instrumentation extra when operational traces and
+metrics are useful:
+
+```bash
+pip install 'modelsentry[otel]'
+```
+
+ModelSentry uses the active OpenTelemetry providers and standard `OTEL_*`
+configuration. For a standalone process, configure an OTLP provider explicitly:
+
+```python
+from modelsentry.telemetry import configure_telemetry
+
+configure_telemetry()  # reads OTEL_EXPORTER_OTLP_* and OTEL_SERVICE_NAME
+```
+
+Application-owned providers are never replaced. If OpenTelemetry is not
+installed or is disabled with `MODELSENTRY_OTEL_ENABLED=false`, all telemetry
+calls are no-ops and ModelSentry behaves exactly as before. Set
+`MODELSENTRY_OTEL_INCLUDE_MODEL_ID=true` (or pass
+`telemetry_include_model_id=True` to `ms.init`) only when model IDs are safe to
+export; model IDs are never metric attributes.
+
+### Signals and code path
+
+Traces and metrics cover ModelSentry-owned work only:
+
+```text
+predict returns → capture/buffer → worker queue → profile + handler
+                 → storage → drift comparison → alert delivery
+dashboard request → FastAPI HTTP span → storage reads
+```
+
+Capture starts after the decorated prediction returns, so customer model
+execution is not wrapped or measured. Aggregate profile batches link (up to 16)
+capture spans across the worker boundary and report queue delay. Signals include
+capture, batch submission, profile/handler duration and outcome, storage
+operation duration, buffer size, drift duration/severity, alert
+filtering/delivery, and FastAPI request duration/status.
+
+Span names are `modelsentry.capture`, `modelsentry.profile`,
+`modelsentry.profile_handler`, `modelsentry.storage`, `modelsentry.drift`, and
+`modelsentry.alert`; HTTP spans come from the standard FastAPI instrumentor.
+Metric instruments use the corresponding `modelsentry.*.count`,
+`*.duration`, `*.errors`, `modelsentry.buffer.size`, and
+`modelsentry.batch.submitted` names with bounded `outcome`, `severity`,
+`operation`, `object`, `reason`, and `task_type` attributes.
+
+Only bounded operational fields are emitted: counts, durations, task type,
+severity, operation, outcome, and HTTP route templates. Raw features,
+predictions, feature names, profile/report contents, request/response bodies,
+emails, credentials, filesystem paths, and exception messages are never
+recorded. Errors contain only a sanitized exception type and fixed stage name.
+
+To verify locally, point `OTEL_EXPORTER_OTLP_ENDPOINT` at an OpenTelemetry
+Collector and inspect one prediction window, one drift evaluation, one alert
+attempt, and one dashboard request. Confirm spans are connected through the
+worker links and contain no customer data.
+
+---
+
 ## Links
 
 - **Website:** [getmodelsentry.com](https://getmodelsentry.com)

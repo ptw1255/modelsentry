@@ -12,11 +12,13 @@ from __future__ import annotations
 import logging
 import math
 import smtplib
-from dataclasses import dataclass, field
+import time
+from dataclasses import dataclass
 from email.mime.text import MIMEText
 from typing import Literal
 
 from modelsentry.drift import DriftReport
+from modelsentry import telemetry as _telemetry
 
 log = logging.getLogger(__name__)
 
@@ -91,24 +93,76 @@ def send_drift_alert(report: DriftReport, model_id: str, config: AlertConfig) ->
         model_id: Identifier of the monitored model.
         config: SMTP connection settings and filtering rules.
     """
-    if not _severity_meets_threshold(report.overall_severity, config.min_severity):
-        return False
-    if config.model_id_filter is not None and model_id not in config.model_id_filter:
-        return False
+    started = time.perf_counter()
+    attrs = {
+        "modelsentry.operation": "send",
+        "modelsentry.alert.severity": report.overall_severity,
+    }
+    attrs.update(_telemetry.model_attributes(model_id))
+    with _telemetry.span("modelsentry.alert", attrs) as current:
+        if not _severity_meets_threshold(report.overall_severity, config.min_severity):
+            _telemetry.set_attributes(current, {"modelsentry.outcome": "filtered"})
+            _telemetry.record_counter(
+                "modelsentry.alert.attempts",
+                attributes={"outcome": "filtered", "severity": report.overall_severity},
+            )
+            _telemetry.record_duration(
+                "modelsentry.alert.duration",
+                (time.perf_counter() - started) * 1000,
+                attributes={"outcome": "filtered"},
+            )
+            return False
+        if (
+            config.model_id_filter is not None
+            and model_id not in config.model_id_filter
+        ):
+            _telemetry.set_attributes(current, {"modelsentry.outcome": "filtered"})
+            _telemetry.record_counter(
+                "modelsentry.alert.attempts",
+                attributes={"outcome": "filtered", "severity": report.overall_severity},
+            )
+            _telemetry.record_duration(
+                "modelsentry.alert.duration",
+                (time.perf_counter() - started) * 1000,
+                attributes={"outcome": "filtered"},
+            )
+            return False
 
-    from_addr = config.from_email or config.smtp_user
-    msg = MIMEText(_build_body(report, model_id), "plain")
-    msg["Subject"] = _build_subject(model_id, report.overall_severity)
-    msg["From"] = from_addr
-    msg["To"] = config.recipient_email
+        from_addr = config.from_email or config.smtp_user
+        msg = MIMEText(_build_body(report, model_id), "plain")
+        msg["Subject"] = _build_subject(model_id, report.overall_severity)
+        msg["From"] = from_addr
+        msg["To"] = config.recipient_email
 
-    try:
-        with smtplib.SMTP(config.smtp_host, config.smtp_port) as smtp:
-            smtp.starttls()
-            smtp.login(config.smtp_user, config.smtp_password)
-            smtp.sendmail(from_addr, [config.recipient_email], msg.as_string())
-        log.info("Drift alert sent for model=%s severity=%s", model_id, report.overall_severity)
-        return True
-    except Exception as exc:
-        log.warning("Failed to send drift alert for model=%s: %s", model_id, exc)
-        return False
+        outcome = "error"
+        try:
+            with smtplib.SMTP(config.smtp_host, config.smtp_port) as smtp:
+                smtp.starttls()
+                smtp.login(config.smtp_user, config.smtp_password)
+                smtp.sendmail(from_addr, [config.recipient_email], msg.as_string())
+            _telemetry.set_attributes(current, {"modelsentry.outcome": "sent"})
+            _telemetry.record_counter(
+                "modelsentry.alert.attempts",
+                attributes={"outcome": "sent", "severity": report.overall_severity},
+            )
+            outcome = "sent"
+            log.info(
+                "Drift alert sent for model=%s severity=%s",
+                model_id,
+                report.overall_severity,
+            )
+            return True
+        except Exception as exc:
+            _telemetry.record_error(current, exc, stage="alert_delivery")
+            _telemetry.record_counter(
+                "modelsentry.alert.attempts",
+                attributes={"outcome": "error", "severity": report.overall_severity},
+            )
+            log.warning("Failed to send drift alert for model=%s: %s", model_id, exc)
+            return False
+        finally:
+            _telemetry.record_duration(
+                "modelsentry.alert.duration",
+                (time.perf_counter() - started) * 1000,
+                attributes={"outcome": outcome},
+            )

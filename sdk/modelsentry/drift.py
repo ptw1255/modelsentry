@@ -26,6 +26,7 @@ from modelsentry.profiler import (
     Profile,
     compute_psi,
 )
+from modelsentry import telemetry as _telemetry
 
 Severity = Literal["stable", "warning", "critical"]
 SCHEMA_VERSION = "1.0"
@@ -59,6 +60,7 @@ class DriftReport:
     missing_in_baseline: tuple[str, ...]
 
 
+@_telemetry.instrument_drift
 def detect_drift(
     baseline: Profile,
     current: Profile,
