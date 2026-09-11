@@ -127,11 +127,12 @@ def test_full_flow_install_to_alert(tmp_storage, dashboard_file):
     # test-only artifact; real profile_windows are minutes apart).
     # ------------------------------------------------------------------
     profile_count = 0
+    profile_paths = []
 
     def save_handler(prof, mid: str) -> None:
         nonlocal profile_count
         ts = f"2026-05-06T10-00-{profile_count:02d}"
-        storage.save_profile(prof, mid, timestamp=ts)
+        profile_paths.append(storage.save_profile(prof, mid, timestamp=ts))
         profile_count += 1
 
     ms.init(
@@ -210,7 +211,12 @@ def test_full_flow_install_to_alert(tmp_storage, dashboard_file):
     with patch("smtplib.SMTP", return_value=smtp_cm) as mock_smtp_cls, patch(
         "modelsentry.server.send_drift_alert", wraps=real_send_drift_alert
     ) as alert_spy:
-        storage.save_drift_report(report, MODEL_ID)
+        storage.save_drift_report(
+            report,
+            MODEL_ID,
+            profile_id=profile_paths[-1].stem,
+            baseline_id=storage.get_baseline_id(MODEL_ID),
+        )
 
     alert_spy.assert_called_once()
     call_args = alert_spy.call_args[0]

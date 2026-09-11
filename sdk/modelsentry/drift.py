@@ -58,6 +58,8 @@ class DriftReport:
     feature_results: dict[str, FeatureDriftResult]
     missing_in_current: tuple[str, ...]
     missing_in_baseline: tuple[str, ...]
+    profile_id: str | None = None
+    baseline_id: str | None = None
 
 
 @_telemetry.instrument_drift

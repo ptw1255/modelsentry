@@ -371,8 +371,16 @@ def test_drift_endpoint_dedups_consecutive_severity(client):
 def test_features_endpoint_combines_data(client):
     report, baseline, current = _make_drift_report()
     storage.save_baseline(baseline, "m1")
-    storage.save_profile(current, "m1", timestamp="2026-05-06T11-00-00")
-    storage.save_drift_report(report, "m1", timestamp="2026-05-06T11-00-00")
+    profile_path = storage.save_profile(
+        current, "m1", timestamp="2026-05-06T11-00-00"
+    )
+    storage.save_drift_report(
+        report,
+        "m1",
+        timestamp="2026-05-06T11-00-00",
+        profile_id=profile_path.stem,
+        baseline_id=storage.get_baseline_id("m1"),
+    )
 
     resp = client.get("/api/models/m1/features")
     assert resp.status_code == 200
@@ -399,6 +407,43 @@ def test_features_endpoint_combines_data(client):
     assert country_view["baseline_distribution"] is None
     assert country_view["baseline_value_counts"] is not None
     assert country_view["current_value_counts"] is not None
+
+
+def test_features_endpoint_does_not_mix_unbound_report_and_profile(client):
+    """A report without evidence IDs cannot label an independently loaded profile."""
+    report, baseline, report_profile = _make_drift_report()
+    storage.save_baseline(baseline, "m1")
+    storage.save_profile(report_profile, "m1", timestamp="2026-05-06T10-00-00")
+    storage.save_drift_report(report, "m1", timestamp="2026-05-06T10-00-00")
+    storage.save_profile(_make_profile(seed=999), "m1", timestamp="2026-05-06T11-00-00")
+
+    resp = client.get("/api/models/m1/features")
+    assert resp.status_code == 200
+    for feature in resp.json()["features"]:
+        assert feature["severity"] == "unknown"
+        assert feature["psi"] is None
+
+
+def test_features_endpoint_loads_profile_bound_to_latest_report(client):
+    """A later unrelated profile cannot replace the report's referenced profile."""
+    report, baseline, report_profile = _make_drift_report()
+    storage.save_baseline(baseline, "m1")
+    bound_path = storage.save_profile(
+        report_profile, "m1", timestamp="2026-05-06T10-00-00"
+    )
+    storage.save_drift_report(
+        report,
+        "m1",
+        timestamp="2026-05-06T10-00-00",
+        profile_id=bound_path.stem,
+        baseline_id=storage.get_baseline_id("m1"),
+    )
+    storage.save_profile(_make_profile(seed=999), "m1", timestamp="2026-05-06T11-00-00")
+
+    body = client.get("/api/models/m1/features").json()
+    age = next(feature for feature in body["features"] if feature["name"] == "age")
+    expected = report_profile.feature_profiles["age"].distribution
+    assert age["current_distribution"]["bin_counts"] == list(expected.bin_counts)
 
 
 def test_features_endpoint_severity_unknown_without_drift_report(client):

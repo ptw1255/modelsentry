@@ -148,6 +148,8 @@ class DriftReportModel(BaseModel):
     feature_results: dict[str, FeatureDriftResultModel]
     missing_in_current: list[str]
     missing_in_baseline: list[str]
+    profile_id: str | None = None
+    baseline_id: str | None = None
     detected_at: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
@@ -212,6 +214,8 @@ def _drift_to_model(ts: datetime, r: DriftReport) -> DriftReportModel:
         },
         missing_in_current=list(r.missing_in_current),
         missing_in_baseline=list(r.missing_in_baseline),
+        profile_id=r.profile_id,
+        baseline_id=r.baseline_id,
         detected_at=ts.isoformat(),
     )
 
@@ -245,6 +249,21 @@ def _build_features_view(model_id: str) -> FeaturesResponse:
     current = current_list[0] if current_list else None
     report_list = storage.load_drift_reports(model_id, limit=1)
     report = report_list[0] if report_list else None
+    if report is not None:
+        baseline_matches = (
+            report.baseline_id is not None
+            and report.baseline_id == storage.get_baseline_id(model_id)
+        )
+        bound_current = (
+            storage.load_profile_by_id(model_id, report.profile_id)
+            if report.profile_id is not None
+            else None
+        )
+        if baseline_matches and bound_current is not None:
+            current = bound_current
+        else:
+            # Never attach a report's scores to independently selected profile data.
+            report = None
 
     feature_names: set[str] = set()
     if baseline is not None:

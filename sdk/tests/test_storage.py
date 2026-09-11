@@ -14,6 +14,7 @@ from modelsentry.drift import FeatureDriftResult, detect_drift
 from modelsentry.profiler import profile
 import modelsentry.storage as storage_module
 from modelsentry.storage import (
+    get_baseline_id,
     get_last_updated,
     get_prediction_count,
     list_models,
@@ -21,6 +22,7 @@ from modelsentry.storage import (
     load_drift_reports,
     load_drift_reports_with_timestamps,
     load_profiles,
+    load_profile_by_id,
     save_baseline,
     save_drift_report,
     save_profile,
@@ -118,6 +120,20 @@ def test_profile_roundtrip(tmp_storage):
     loaded = load_profiles(model_id)
     assert len(loaded) == 1
     assert loaded[0] == prof
+
+
+def test_duplicate_profile_timestamp_does_not_overwrite(tmp_storage):
+    """Two records with the same supplied timestamp remain independently readable."""
+    first, _, _ = make_profile(seed=1)
+    second, _, _ = make_profile(seed=2)
+
+    first_path = save_profile(first, "test-model", timestamp="2026-05-06T10-00-00")
+    second_path = save_profile(second, "test-model", timestamp="2026-05-06T10-00-00")
+
+    assert first_path != second_path
+    assert len(load_profiles("test-model")) == 2
+    assert load_profile_by_id("test-model", first_path.stem) == first
+    assert load_profile_by_id("test-model", second_path.stem) == second
 
 
 def test_profile_roundtrip_numeric_stats(tmp_storage):
@@ -286,6 +302,45 @@ def test_drift_report_roundtrip_stable(tmp_storage):
         assert loaded_feat.ks_statistic == orig.ks_statistic
         assert loaded_feat.ks_p_value == orig.ks_p_value
         assert loaded_feat.notes == orig.notes
+
+
+def test_drift_report_roundtrip_preserves_evidence_ids(tmp_storage):
+    report, baseline, current = make_drift_report()
+    save_baseline(baseline, "test-model")
+    profile_path = save_profile(current, "test-model")
+
+    save_drift_report(
+        report,
+        "test-model",
+        profile_id=profile_path.stem,
+        baseline_id=get_baseline_id("test-model"),
+    )
+
+    loaded = load_drift_reports("test-model")[0]
+    assert loaded.profile_id == profile_path.stem
+    assert loaded.baseline_id == get_baseline_id("test-model")
+
+
+def test_duplicate_drift_timestamp_does_not_overwrite(tmp_storage):
+    report, _, _ = make_drift_report()
+
+    first = save_drift_report(
+        report, "test-model", timestamp="2026-05-06T10-00-00"
+    )
+    second = save_drift_report(
+        report, "test-model", timestamp="2026-05-06T10-00-00"
+    )
+
+    assert first != second
+    assert len(load_drift_reports("test-model")) == 2
+
+
+def test_drift_report_rejects_invalid_evidence_ids(tmp_storage):
+    report, _, _ = make_drift_report()
+    with pytest.raises(ValueError, match="profile_id"):
+        save_drift_report(report, "test-model", profile_id="../profile")
+    with pytest.raises(ValueError, match="baseline_id"):
+        save_drift_report(report, "test-model", baseline_id="not-a-hash")
 
 
 def test_drift_report_roundtrip_nan_psi(tmp_storage):
@@ -471,6 +526,32 @@ def test_timestamp_string_accepted(tmp_storage):
     path_report = save_drift_report(report, model_id, timestamp=iso_ts)
     assert path_report.exists()
     assert "2026-05-06T14-30-45.json" in str(path_report)
+
+
+@pytest.mark.parametrize("timestamp", ["../escape", "/tmp/escape", "bad/name"])
+def test_timestamp_cannot_escape_record_directory(tmp_storage, timestamp):
+    prof, _, _ = make_profile()
+    with pytest.raises(ValueError, match="timestamp"):
+        save_profile(prof, "test-model", timestamp=timestamp)
+
+
+@pytest.mark.parametrize(
+    "model_id", ["../escape", "/tmp/escape", "bad/name", "", ".hidden"]
+)
+def test_model_id_cannot_escape_storage_root(tmp_storage, model_id):
+    prof, _, _ = make_profile()
+    with pytest.raises(ValueError, match="model_id"):
+        save_profile(prof, model_id)
+
+
+def test_model_symlink_outside_storage_root_is_rejected(tmp_storage, tmp_path):
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir()
+    (tmp_storage / "linked-model").symlink_to(outside, target_is_directory=True)
+    prof, _, _ = make_profile()
+
+    with pytest.raises(ValueError, match="outside STORAGE_ROOT"):
+        save_profile(prof, "linked-model")
 
 
 # ---------------------------------------------------------------------------

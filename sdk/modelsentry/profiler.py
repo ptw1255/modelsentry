@@ -20,6 +20,7 @@ SCHEMA_VERSION = "1.0"
 DEFAULT_N_BINS = 10
 DEFAULT_TOP_N_CATEGORIES = 50
 OTHER_BUCKET = "__other__"
+_TYPED_CATEGORY_PREFIX = "__modelsentry_type__:"
 
 
 @dataclass(frozen=True)
@@ -326,14 +327,30 @@ def _profile_categorical_feature(
 
 
 def _truncate_value_counts(counts: pd.Series, top_n: int) -> dict[str, int]:
-    """Keep top_n categories; collapse the tail into ``__other__``."""
+    """Keep top_n categories without collapsing distinct typed keys."""
     head = counts.head(top_n)
-    result = {str(k): int(v) for k, v in head.items()}
+    result = {_encode_category_key(k): int(v) for k, v in head.items()}
     if len(counts) > top_n:
         tail_total = int(counts.iloc[top_n:].sum())
         if tail_total > 0:
             result[OTHER_BUCKET] = tail_total
     return result
+
+
+def _encode_category_key(value: object) -> str:
+    """Encode category identity into one collision-free JSON object key."""
+    if isinstance(value, str):
+        if value != OTHER_BUCKET and not value.startswith(_TYPED_CATEGORY_PREFIX):
+            return value
+        return f"{_TYPED_CATEGORY_PREFIX}str:{value}"
+    if isinstance(value, (bool, np.bool_)):
+        return f"{_TYPED_CATEGORY_PREFIX}bool:{str(bool(value)).lower()}"
+    if isinstance(value, (int, np.integer)):
+        return f"{_TYPED_CATEGORY_PREFIX}int:{int(value)}"
+    if isinstance(value, (float, np.floating)):
+        return f"{_TYPED_CATEGORY_PREFIX}float:{float(value).hex()}"
+    type_name = f"{type(value).__module__}.{type(value).__qualname__}"
+    return f"{_TYPED_CATEGORY_PREFIX}{type_name}:{value!s}"
 
 
 def _profile_predictions(

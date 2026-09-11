@@ -15,8 +15,10 @@ Directory layout:
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import math
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -40,6 +42,9 @@ _alert_callback: Callable[[DriftReport, str], None] | None = None
 _PROFILES_DIR = "profiles"
 _DRIFT_DIR = "drift_reports"
 _BASELINE_FILE = "baseline.json"
+_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+_RECORD_ID_RE = re.compile(r"^[0-9][0-9TZ+_.-]{0,127}$")
+_BASELINE_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 # ---------------------------------------------------------------------------
@@ -48,13 +53,25 @@ _BASELINE_FILE = "baseline.json"
 
 
 def _model_dir(model_id: str) -> Path:
-    return STORAGE_ROOT / model_id
+    if not isinstance(model_id, str) or _MODEL_ID_RE.fullmatch(model_id) is None:
+        raise ValueError(
+            "model_id must start with an alphanumeric character and contain "
+            "at most 64 alphanumeric, underscore, dot, or hyphen characters"
+        )
+    root = STORAGE_ROOT.resolve()
+    target = (root / model_id).resolve()
+    if target.parent != root:
+        raise ValueError("model_id resolves outside STORAGE_ROOT")
+    return target
 
 
 def _ensure_dirs(model_id: str) -> None:
     base = _model_dir(model_id)
-    (base / _PROFILES_DIR).mkdir(parents=True, exist_ok=True)
-    (base / _DRIFT_DIR).mkdir(parents=True, exist_ok=True)
+    for child in (_PROFILES_DIR, _DRIFT_DIR):
+        directory = base / child
+        directory.mkdir(parents=True, exist_ok=True)
+        if directory.resolve().parent != base:
+            raise ValueError(f"{child} resolves outside the model directory")
 
 
 # ---------------------------------------------------------------------------
@@ -71,10 +88,39 @@ def _to_filename(ts: datetime | str | None) -> str:
     if ts is None:
         ts = datetime.now(timezone.utc)
     if isinstance(ts, datetime):
-        iso = ts.isoformat(timespec="seconds")
+        iso = ts.isoformat(timespec="microseconds")
     else:
         iso = str(ts)
-    return iso.replace(":", "-") + ".json"
+    filename = iso.replace(":", "-") + ".json"
+    if Path(filename).name != filename or _RECORD_ID_RE.fullmatch(Path(filename).stem) is None:
+        raise ValueError("timestamp contains unsupported filename characters")
+    return filename
+
+
+def _write_unique_json(directory: Path, filename: str, data: dict[str, Any]) -> Path:
+    """Create a JSON record without overwriting an existing timestamp."""
+    base = Path(filename)
+    attempt = 0
+    while True:
+        suffix = "" if attempt == 0 else f"-{attempt}"
+        candidate = directory / f"{base.stem}{suffix}{base.suffix}"
+        try:
+            with candidate.open("x", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=2)
+            return candidate
+        except FileExistsError:
+            attempt += 1
+
+
+def _profile_id_from_path(path: Path) -> str:
+    return path.stem
+
+
+def _baseline_id(profile: Profile) -> str:
+    payload = json.dumps(
+        _profile_to_dict(profile), sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +267,8 @@ def _drift_report_to_dict(r: DriftReport) -> dict[str, Any]:
         },
         "missing_in_current": list(r.missing_in_current),
         "missing_in_baseline": list(r.missing_in_baseline),
+        "profile_id": r.profile_id,
+        "baseline_id": r.baseline_id,
     }
 
 
@@ -246,6 +294,8 @@ def _dict_to_drift_report(d: dict) -> DriftReport:
         },
         missing_in_current=tuple(d.get("missing_in_current", [])),
         missing_in_baseline=tuple(d.get("missing_in_baseline", [])),
+        profile_id=d.get("profile_id"),
+        baseline_id=d.get("baseline_id"),
     )
 
 
@@ -289,9 +339,10 @@ def save_profile(
         Path to the written JSON file.
     """
     _ensure_dirs(model_id)
-    path = _model_dir(model_id) / _PROFILES_DIR / _to_filename(timestamp)
-    path.write_text(json.dumps(_profile_to_dict(profile), indent=2), encoding="utf-8")
-    return path
+    profiles_dir = _model_dir(model_id) / _PROFILES_DIR
+    return _write_unique_json(
+        profiles_dir, _to_filename(timestamp), _profile_to_dict(profile)
+    )
 
 
 @_telemetry.instrument_storage("load", "profile")
@@ -344,8 +395,29 @@ def save_baseline(profile: Profile, model_id: str) -> Path:
     """
     _ensure_dirs(model_id)
     path = _model_dir(model_id) / _BASELINE_FILE
-    path.write_text(json.dumps(_profile_to_dict(profile), indent=2), encoding="utf-8")
+    data = _profile_to_dict(profile)
+    data["baseline_id"] = _baseline_id(profile)
+    if path.is_symlink():
+        raise ValueError("baseline path must not be a symbolic link")
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     return path
+
+
+def get_baseline_id(model_id: str) -> str | None:
+    """Return the content-derived identifier for the current baseline."""
+    path = _model_dir(model_id) / _BASELINE_FILE
+    if not path.exists():
+        return None
+    raw = _load_json_file(path, "baseline")
+    if raw is None:
+        return None
+    stored = raw.get("baseline_id")
+    if isinstance(stored, str):
+        return stored
+    try:
+        return _baseline_id(_dict_to_profile(raw))
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 @_telemetry.instrument_storage("load", "baseline")
@@ -376,6 +448,9 @@ def save_drift_report(
     report: DriftReport,
     model_id: str,
     timestamp: datetime | str | None = None,
+    *,
+    profile_id: str | None = None,
+    baseline_id: str | None = None,
 ) -> Path:
     """Persist a DriftReport as JSON under ~/.modelsentry/{model_id}/drift_reports/.
 
@@ -388,16 +463,54 @@ def save_drift_report(
         Path to the written JSON file.
     """
     _ensure_dirs(model_id)
-    path = _model_dir(model_id) / _DRIFT_DIR / _to_filename(timestamp)
-    data = _drift_report_to_dict(report)
+    drift_dir = _model_dir(model_id) / _DRIFT_DIR
+    effective_profile_id = profile_id if profile_id is not None else report.profile_id
+    effective_baseline_id = (
+        baseline_id if baseline_id is not None else report.baseline_id
+    )
+    if (
+        effective_profile_id is not None
+        and _RECORD_ID_RE.fullmatch(effective_profile_id) is None
+    ):
+        raise ValueError("profile_id is invalid")
+    if (
+        effective_baseline_id is not None
+        and _BASELINE_ID_RE.fullmatch(effective_baseline_id) is None
+    ):
+        raise ValueError("baseline_id is invalid")
+    effective_report = DriftReport(
+        schema_version=report.schema_version,
+        overall_severity=report.overall_severity,
+        feature_results=report.feature_results,
+        missing_in_current=report.missing_in_current,
+        missing_in_baseline=report.missing_in_baseline,
+        profile_id=effective_profile_id,
+        baseline_id=effective_baseline_id,
+    )
+    data = _drift_report_to_dict(effective_report)
     data["detected_at"] = datetime.now(timezone.utc).isoformat()
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    path = _write_unique_json(drift_dir, _to_filename(timestamp), data)
     if _alert_callback is not None:
         try:
             _alert_callback(report, model_id)
         except Exception as exc:
             _log.warning("Alert callback raised for model=%s: %s", model_id, exc)
     return path
+
+
+@_telemetry.instrument_storage("load", "profile")
+def load_profile_by_id(model_id: str, profile_id: str) -> Profile | None:
+    """Load one profile by its storage-assigned identifier."""
+    if not isinstance(profile_id, str) or _RECORD_ID_RE.fullmatch(profile_id) is None:
+        return None
+    path = _model_dir(model_id) / _PROFILES_DIR / f"{profile_id}.json"
+    raw = _load_json_file(path, "profile") if path.exists() else None
+    if raw is None:
+        return None
+    try:
+        return _dict_to_profile(raw)
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 @_telemetry.instrument_storage("load", "drift_report")
@@ -524,7 +637,16 @@ def list_models() -> list[str]:
     """
     if not STORAGE_ROOT.exists():
         return []
-    return sorted(p.name for p in STORAGE_ROOT.iterdir() if p.is_dir())
+    models: list[str] = []
+    for path in STORAGE_ROOT.iterdir():
+        if not path.is_dir() or _MODEL_ID_RE.fullmatch(path.name) is None:
+            continue
+        try:
+            _model_dir(path.name)
+        except ValueError:
+            continue
+        models.append(path.name)
+    return sorted(models)
 
 
 def set_alert_callback(
