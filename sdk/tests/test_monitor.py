@@ -393,16 +393,17 @@ def sdk_default():
     with (
         patch.object(_storage_mod, "save_profile") as mock_save,
         patch.object(_storage_mod, "save_baseline") as mock_baseline,
+        patch.object(_storage_mod, "save_drift_report") as mock_drift,
         patch.object(_storage_mod, "load_baseline") as mock_load,
     ):
         mock_load.return_value = None  # no baseline exists yet by default
         ms.init(model_id="test-model", profile_window=3)
-        yield mock_save, mock_baseline, mock_load
+        yield mock_save, mock_baseline, mock_drift, mock_load
     shutdown()
 
 
 def test_default_handler_saves_profile(sdk_default, small_df):
-    mock_save, _baseline, _load = sdk_default
+    mock_save, _baseline, _drift, _load = sdk_default
 
     @ms.monitor()
     def predict(X):
@@ -419,7 +420,7 @@ def test_default_handler_saves_profile(sdk_default, small_df):
 
 
 def test_default_handler_saves_baseline_when_none_exists(sdk_default, small_df):
-    _save, mock_baseline, mock_load = sdk_default
+    _save, mock_baseline, _drift, mock_load = sdk_default
     mock_load.return_value = None  # no baseline
 
     @ms.monitor()
@@ -437,7 +438,7 @@ def test_default_handler_saves_baseline_when_none_exists(sdk_default, small_df):
 
 
 def test_default_handler_skips_baseline_when_exists(sdk_default, small_df):
-    _save, mock_baseline, mock_load = sdk_default
+    _save, mock_baseline, _drift, mock_load = sdk_default
     mock_load.return_value = MagicMock()  # baseline already exists
 
     @ms.monitor()
@@ -449,6 +450,29 @@ def test_default_handler_skips_baseline_when_exists(sdk_default, small_df):
     flush()
 
     mock_baseline.assert_not_called()
+
+
+def test_default_handler_profiles_with_baseline_edges_and_saves_drift(
+    tmp_path, monkeypatch
+):
+    """The default SDK path produces a comparable persisted drift report."""
+    monkeypatch.setattr(_storage_mod, "STORAGE_ROOT", tmp_path)
+    ms.init(model_id="test-model", profile_window=1)
+
+    @ms.monitor()
+    def predict(X):
+        return np.zeros(len(X))
+
+    predict(pd.DataFrame({"value": [0.0, 1.0, 2.0, 3.0]}))
+    flush()
+    predict(pd.DataFrame({"value": [10.0, 11.0, 12.0, 13.0]}))
+    flush()
+
+    reports = _storage_mod.load_drift_reports("test-model")
+    assert len(reports) == 1
+    result = reports[0].feature_results["value"]
+    assert "bin edges mismatch" not in " ".join(result.notes)
+    assert result.severity == "critical"
 
 
 def test_api_key_optional():

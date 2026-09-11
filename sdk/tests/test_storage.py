@@ -369,7 +369,7 @@ def test_get_prediction_count_zero(tmp_storage):
 
 
 def test_get_prediction_count_sums_all(tmp_storage):
-    """baseline.n_rows + profile.n_rows totalled correctly."""
+    """Only monitored profile rows are counted; baseline is a reference copy."""
     prof1, _, _ = make_profile(n_rows=100, seed=1)
     prof2, _, _ = make_profile(n_rows=50, seed=2)
     prof3, _, _ = make_profile(n_rows=75, seed=3)
@@ -380,8 +380,15 @@ def test_get_prediction_count_sums_all(tmp_storage):
     save_profile(prof3, model_id, timestamp="2026-05-06T11-00-00")
 
     total = get_prediction_count(model_id)
-    # baseline (100) + profile1 (50) + profile2 (75) = 225
-    assert total == 225
+    assert total == 125
+
+
+def test_get_prediction_count_does_not_count_baseline_only(tmp_storage):
+    """A baseline copy does not add a second set of monitored predictions."""
+    baseline, _, _ = make_profile(n_rows=100, seed=1)
+    save_baseline(baseline, "test-model")
+
+    assert get_prediction_count("test-model") == 0
 
 
 # ---------------------------------------------------------------------------
