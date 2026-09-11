@@ -1,7 +1,7 @@
 ---
 name: drift-investigator
 description: Produces bounded, evidence-cited hypotheses from ModelSentry aggregate drift history. Use only after a warning or critical drift report exists. Never claims root cause, reads raw observations, or changes monitoring state.
-model: claude-sonnet-4-6
+model: claude-sonnet-5
 allowedTools: []
 ---
 
