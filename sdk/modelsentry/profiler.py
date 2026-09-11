@@ -88,6 +88,7 @@ def profile(
     n_bins: int = DEFAULT_N_BINS,
     top_n_categories: int = DEFAULT_TOP_N_CATEGORIES,
     baseline_edges: dict[str, tuple[float, ...]] | None = None,
+    prediction_task_type: Literal["regression", "classification"] | None = None,
 ) -> Profile:
     """Compute a privacy-preserving statistical profile.
 
@@ -103,6 +104,9 @@ def profile(
         baseline_edges: Optional pre-existing per-feature bin edges. When provided,
             the resulting Distribution objects reuse those edges so the profile is
             directly comparable to the baseline (PSI requires shared edges).
+        prediction_task_type: Explicit prediction semantics. Use
+            ``classification`` for integer class labels. When omitted, numeric
+            predictions retain the legacy regression inference.
 
     Returns:
         Profile object containing only aggregate statistics.
@@ -135,7 +139,11 @@ def profile(
                 name, series, top_n_categories
             )
 
-    prediction_profile = _profile_predictions(predictions, n_bins)
+    if prediction_task_type not in (None, "regression", "classification"):
+        raise ValueError(f"invalid prediction_task_type: {prediction_task_type}")
+    prediction_profile = _profile_predictions(
+        predictions, n_bins, task_type=prediction_task_type
+    )
 
     return Profile(
         schema_version=SCHEMA_VERSION,
@@ -329,10 +337,13 @@ def _truncate_value_counts(counts: pd.Series, top_n: int) -> dict[str, int]:
 
 
 def _profile_predictions(
-    predictions: np.ndarray, n_bins: int
+    predictions: np.ndarray,
+    n_bins: int,
+    *,
+    task_type: Literal["regression", "classification"] | None = None,
 ) -> PredictionProfile:
     """Profile prediction array as regression or classification."""
-    task = _classify_predictions(predictions)
+    task = task_type or _classify_predictions(predictions)
     total = predictions.size
     if task == "regression":
         mask = ~pd.isna(predictions)

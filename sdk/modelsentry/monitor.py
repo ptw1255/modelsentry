@@ -17,13 +17,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Literal, TypeVar
 
 import numpy as np
 import pandas as pd
 
 import modelsentry.storage as _storage
 from modelsentry import telemetry as _telemetry
+from modelsentry.drift import detect_drift
 from modelsentry.profiler import Profile, profile
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -41,6 +42,7 @@ class _SdkConfig:
     logger: logging.Logger
     storage_path: Path | None
     telemetry_include_model_id: bool
+    prediction_task_type: Literal["regression", "classification"] | None
 
 
 @dataclass
@@ -68,6 +70,7 @@ def init(
     storage_path: Path | str | None = None,
     logger: logging.Logger | None = None,
     telemetry_include_model_id: bool = False,
+    prediction_task_type: Literal["regression", "classification"] | None = None,
 ) -> None:
     """Initialize the ModelSentry SDK.
 
@@ -87,6 +90,8 @@ def init(
         logger: Custom logger; defaults to logging.getLogger("modelsentry").
         telemetry_include_model_id: Explicitly include model_id on spans. Model
             IDs are never emitted as metric attributes. Defaults to False.
+        prediction_task_type: Explicit prediction semantics. Set to
+            ``classification`` when the wrapped model returns integer labels.
     """
     if profile_window < 1:
         raise ValueError(f"profile_window must be >= 1, got {profile_window}")
@@ -110,6 +115,7 @@ def init(
         logger=log,
         storage_path=resolved_path,
         telemetry_include_model_id=telemetry_include_model_id,
+        prediction_task_type=prediction_task_type,
     )
     _executor = ThreadPoolExecutor(
         max_workers=1, thread_name_prefix="modelsentry-worker"
@@ -360,7 +366,26 @@ def _compute_and_dispatch(batch: list[_BufferedCall], model_id: str) -> None:
         try:
             df = _coerce_features([c.features for c in batch])
             preds = _coerce_predictions([c.predictions for c in batch])
-            prof = profile(df, preds)
+            baseline = (
+                _storage.load_baseline(model_id)
+                if config.profile_handler is _default_storage_handler
+                else None
+            )
+            baseline_edges = (
+                {
+                    name: feature.distribution.bin_edges
+                    for name, feature in baseline.feature_profiles.items()
+                    if feature.distribution is not None
+                }
+                if baseline is not None
+                else None
+            )
+            prof = profile(
+                df,
+                preds,
+                baseline_edges=baseline_edges,
+                prediction_task_type=config.prediction_task_type,
+            )
             _latest_profiles[model_id] = prof
             _telemetry.set_attributes(
                 current,
@@ -453,7 +478,7 @@ def _coerce_predictions(predictions_list: list[object]) -> np.ndarray:
 
 
 def _default_storage_handler(prof: Profile, model_id: str) -> None:
-    """Default handler: persist profile to ~/.modelsentry/ and auto-save baseline."""
+    """Persist a profile, initialize its baseline, or save its drift report."""
     try:
         _storage.save_profile(prof, model_id)
     except Exception:
@@ -463,12 +488,16 @@ def _default_storage_handler(prof: Profile, model_id: str) -> None:
             )
         return
     try:
-        if _storage.load_baseline(model_id) is None:
+        baseline = _storage.load_baseline(model_id)
+        if baseline is None:
             _storage.save_baseline(prof, model_id)
+            return
+        report = detect_drift(baseline, prof)
+        _storage.save_drift_report(report, model_id)
     except Exception:
         if _config is not None:
             _config.logger.exception(
-                "modelsentry: failed to save baseline for model_id=%s", model_id
+                "modelsentry: failed to update drift state for model_id=%s", model_id
             )
 
 

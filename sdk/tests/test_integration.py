@@ -238,9 +238,8 @@ def test_full_flow_install_to_alert(tmp_storage, dashboard_file):
     body = r.json()
     assert body["overall_severity"] == report.overall_severity
     assert body["baseline_exists"] is True
-    # baseline + 2 saved profiles, each PROFILE_WINDOW rows. The baseline
-    # counts toward the total (see storage.get_prediction_count docstring).
-    assert body["prediction_count"] == PROFILE_WINDOW * 3
+    # Two monitored profile windows. The baseline is a reference copy.
+    assert body["prediction_count"] == PROFILE_WINDOW * 2
     assert body["last_updated"] is not None
 
     r = client.get(f"/api/models/{MODEL_ID}/features")

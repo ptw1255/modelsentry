@@ -486,13 +486,9 @@ def load_drift_reports_with_timestamps(
 def get_prediction_count(model_id: str) -> int:
     """Return the total number of predictions monitored for a model.
 
-    Sums ``n_rows`` from baseline.json (if present) and all files in profiles/.
-    Returns 0 if no data exists.
-
-    Note: baseline and rolling profiles are independent storage paths. Callers
-    are responsible for not double-counting — if the same prediction window was
-    passed to both ``save_baseline`` and ``save_profile``, those rows will be
-    counted twice here.
+    Sums ``n_rows`` from files in profiles/. The baseline is a reference copy
+    of a monitored profile and is excluded so its rows are not counted twice.
+    Returns 0 if no profiles exist.
 
     Args:
         model_id: Identifier for the model.
@@ -501,10 +497,6 @@ def get_prediction_count(model_id: str) -> int:
         Total prediction count across all stored profiles.
     """
     total = 0
-
-    baseline = load_baseline(model_id)
-    if baseline is not None:
-        total += baseline.n_rows
 
     profiles_dir = _model_dir(model_id) / _PROFILES_DIR
     if profiles_dir.exists():
