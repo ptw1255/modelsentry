@@ -136,13 +136,18 @@ def _compute_and_save_drift(
         else None
     )
     current_profile = profile(df, preds, baseline_edges=edges)
-    storage.save_profile(current_profile, model_id)
+    profile_path = storage.save_profile(current_profile, model_id)
     if baseline is None:
         # Belt-and-braces: pre-seed should have created a baseline already.
         storage.save_baseline(current_profile, model_id)
         return
     report = detect_drift(baseline, current_profile)
-    storage.save_drift_report(report, model_id)
+    storage.save_drift_report(
+        report,
+        model_id,
+        profile_id=profile_path.stem,
+        baseline_id=storage.get_baseline_id(model_id),
+    )
     _maybe_alert(report, model_id)
 
 

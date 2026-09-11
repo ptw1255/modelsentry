@@ -182,6 +182,30 @@ def test_categorical_top_n_truncation() -> None:
     assert len(fp.value_counts) == 11  # top 10 + __other__
 
 
+def test_categorical_keys_preserve_type_identity() -> None:
+    """Integer 1 and string '1' remain separate categories with all rows counted."""
+    df = pd.DataFrame({"category": [1, "1", 1, "1"]})
+    p = profile(df, np.zeros(4))
+
+    counts = p.feature_profiles["category"].value_counts
+    assert counts == {"__modelsentry_type__:int:1": 2, "1": 2}
+    assert sum(counts.values()) == 4
+
+
+def test_real_other_category_does_not_collide_with_tail_bucket() -> None:
+    values = ["common"] * 5 + ["__other__"] * 2 + ["rare"]
+    p = profile(
+        pd.DataFrame({"category": values}),
+        np.zeros(len(values)),
+        top_n_categories=2,
+    )
+
+    counts = p.feature_profiles["category"].value_counts
+    assert counts["__modelsentry_type__:str:__other__"] == 2
+    assert counts["__other__"] == 1
+    assert sum(counts.values()) == len(values)
+
+
 # ---------------------------------------------------------------------------
 # Privacy invariants
 # ---------------------------------------------------------------------------
