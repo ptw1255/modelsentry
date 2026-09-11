@@ -108,7 +108,7 @@ Families with seeded realizations, at least 5 seeds each — a single realizatio
 2. Single numeric location shift
 3. Multi-feature behavioral shift
 4. Bimodal-to-unimodal shape change
-5. New categorical value → **expect `category_identity_ambiguous` and abstention from individual category claims**
+5. New categorical value → **expect `category_identity_ambiguous` and abstention** until the version gap in §22.1 closes; becomes a detection test once it does
 6. Missingness increase
 7. Coordinated upstream feature movement
 8. Step change at a known window
@@ -135,24 +135,34 @@ Hold out effect sizes and feature combinations during prompt development. Do not
 
 ## 6. Fixtures and the evidence-binding blocker
 
-The contract forbids joining baselines, profiles, and reports by list index, filename order, save time, or mtime — and current `DriftReport` records persist no `report_id`, `baseline_id`, `current_profile_id`, `window_start`/`window_end`, or thresholds. This is the stated blocker.
+The contract forbids joining baselines, profiles, and reports by list index, filename order, save time, or mtime. **PR #16 closed two-fifths of that gap.**
 
-**Turn the blocker into a deliverable.** The fixture builder emits the *future* evidence schema alongside each store:
+| Binding the contract requires | Status after PR #16 |
+|---|---|
+| `baseline_id` | **Native** — SHA-256 content ID, `storage.get_baseline_id()` |
+| `current_profile_id` | **Native** — filename-based ID on `DriftReport.profile_id`, `storage.load_profile_by_id()` |
+| `report_id` | Missing — reports still identified by path |
+| `window_start` / `window_end` | Missing — no timestamps on `Profile`; windows implied by filenames only |
+| `thresholds` | Missing — `detect_drift()` takes them as kwargs, `DriftReport` does not record them |
+
+So a real, non-positional join between a report, its baseline, and its profile now exists. Use it. The fixture builder synthesizes **only the three remaining fields** in a sidecar:
 
 ```
-fixtures/<family>/<seed>/baseline.json
-fixtures/<family>/<seed>/profiles/*.json
-fixtures/<family>/<seed>/drift_reports/*.json
-fixtures/<family>/<seed>/evidence_bindings.json   # report_id, baseline_id,
-                                                  # current_profile_id, window_start,
-                                                  # window_end, thresholds
+fixtures/<family>/<seed>/baseline.json          # carries baseline_id
+fixtures/<family>/<seed>/profiles/*.json        # carry profile IDs
+fixtures/<family>/<seed>/drift_reports/*.json   # carry profile_id + baseline_id
+fixtures/<family>/<seed>/evidence_bindings.json # report_id, window_start,
+                                                # window_end, thresholds
 ```
 
-Because we generate the data, we can emit correct bindings. That makes the fixture builder an **executable specification for what the SDK must later persist** — the experiment de-risks the blocker instead of waiting on it.
+The sidecar remains an **executable specification for what the SDK must still persist**, now scoped to what is actually missing. Do not add these three to the SDK as a side effect of this experiment; that is a separate, reviewed change.
 
-Note the consequence: fixtures are no longer plain current-format stores, so they cannot be read through `modelsentry.storage` alone. The reader is `storage` for profile/report payloads plus a binding layer for identifiers. Do not add these fields to the SDK as a side effect of this experiment; that is a separate, reviewed change.
+**Generate fixtures through the real default monitor path.** PR #15 made the default handler compute drift and persist reports itself — first window becomes the baseline, later windows reuse its bin edges — so the builder no longer needs a private pipeline like the one `demos/demo.py` used to carry. Two gotchas that will silently corrupt fixtures:
 
-`storage.STORAGE_ROOT` (`sdk/modelsentry/storage.py:36`) is mutable module-level global state read at call time in `_model_dir()`. The reader acquires a lock, sets the root, performs one complete read, and restores the previous value in a `finally` block. Validate model IDs and window indices. Run task concurrency at 1 for v1; if the lock proves fragile, isolate each task in a process. **Do not change the SDK to solve a fixture problem.**
+- **Set `prediction_task_type="classification"` explicitly** for churn and fraud scenarios. Those generators return integer labels (`0`/`1`), and legacy inference profiles every numeric array as regression, producing regression statistics where class counts belong.
+- Baseline edge reuse is now automatic in the default path; do not also pass `baseline_edges=` by hand, except in family 16 where mismatched bins are the point.
+
+`storage.STORAGE_ROOT` (`sdk/modelsentry/storage.py`) is still mutable module-level global state read at call time in `_model_dir()`. The reader acquires a lock, sets the root, performs one complete read, and restores the previous value in a `finally` block. PR #16 added model-ID validation and traversal/symlink rejection **inside storage**, so the reader no longer needs to duplicate that check — but it must still validate window indices. Run task concurrency at 1 for v1; if the lock proves fragile, isolate each task in a process. **Do not change the SDK to solve a fixture problem.**
 
 ---
 
@@ -260,7 +270,7 @@ Randomize execution order. Retain failures and timeouts. Record model, SDK versi
 
 **Per-model thinking configuration differs:** Opus 5 and Sonnet 5 take `thinking={"type": "adaptive"}`; Haiku 4.5 still takes `budget_tokens`. A uniform sweep will 400 on some.
 
-> The contract's frontmatter pins `model: claude-sonnet-4-6`. Current Sonnet is `claude-sonnet-5` at $2/$10 per MTok — newer and cheaper than 4.6's $3/$15. Worth a one-line update to the contract; flagging rather than changing it here.
+> The contract pins `model: claude-sonnet-5` as of PR #17 — $2/$10 per MTok, newer and cheaper than the 4.6 it replaced. The secondary model comparison still sweeps Haiku 4.5 and Opus 5 against it.
 
 ---
 
@@ -418,10 +428,17 @@ Experiment package and lockfile · versioned scenario catalog (16 families) · d
 
 ## 22. Open questions for the contract owners
 
-1. **Categorical evidence is largely unavailable.** Current profiles cannot support individual category-share deltas (`__other__` collision, string coercion). Family 5 therefore tests abstention rather than detection. Is a profiler change to persist typed category identity in scope before this experiment, or does the experiment proceed with category evidence effectively disabled?
-2. **`get_feature_timeline` carries most of the evidence layer.** With 5 features and an 8-call budget, a run spends 1 call on the trigger, 1 on history, up to 5 on timelines, leaving 1 for a profile window. That is the contract's intent, but it leaves no retry headroom — should failed calls count against the 8, as currently specified, or should there be a small retry allowance?
-3. **Variant A/B legality.** Both require the model to reason over evidence the contract assigns to code. Keeping them as non-shippable ablations is the plan's assumption; confirm that measuring them is acceptable.
-4. **Contract model pin** is `claude-sonnet-4-6`; current Sonnet is `claude-sonnet-5`, cheaper and newer.
+Status as of PRs #15–#17.
+
+1. **Categorical evidence — resolved in code, blocked on a version signal.** PR #16 fixed the root cause: `_TYPED_CATEGORY_PREFIX` keeps `1` and `"1"` distinct and separates a real `__other__` from the truncation bucket, satisfying the contract's "persist typed category identity" branch. **But `profiler.SCHEMA_VERSION` is still `"1.0"`**, and a new profile whose categories are all ordinary strings emits no prefixed keys at all — so a reader cannot tell a post-#16 profile from a legacy one, and the contract's instruction to treat legacy profiles as not comparable would disqualify every profile. *Ask:* bump `profiler.SCHEMA_VERSION` (or add the explicit `category_identity_status` the contract names as the alternative), then amend the contract's categorical section. Until then family 5 stays an abstention test.
+
+2. **Retry headroom — still open.** The contract is unchanged apart from the model line. A run spends 1 call on the trigger, 1 on history, up to 5 on timelines, leaving 1 for a profile window inside the budget of 8, with failed calls counting against it. *Ask:* keep failures counting, or allow a small retry allowance?
+
+3. **Variant A/B legality — still open.** Both ask the model to reason over evidence the contract assigns to code. The plan keeps them as non-shippable ablations and labels them as such in results. *Ask:* confirm measuring them is acceptable.
+
+4. **Model pin — resolved.** PR #17 set `model: claude-sonnet-5`.
+
+5. **Contract Status section is now stale — new.** It still reads "Current `DriftReport` records do not persist … a baseline version, a current-profile ID," but PR #16 added both (`baseline_id`, `profile_id`, `load_profile_by_id()`, `get_baseline_id()`). The remaining gaps are `report_id`, `window_start`/`window_end`, and thresholds. *Ask:* update the Status section so implementers do not treat solved bindings as blockers.
 
 ---
 
