@@ -24,6 +24,7 @@ from typing import Any
 from collections.abc import Callable
 
 from modelsentry.drift import DriftReport, FeatureDriftResult
+from modelsentry import telemetry as _telemetry
 from modelsentry.profiler import (
     Distribution,
     FeatureProfile,
@@ -258,6 +259,10 @@ def _load_json_file(path: Path, label: str) -> dict | None:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+        _telemetry.record_counter(
+            "modelsentry.storage.errors",
+            attributes={"operation": "read", "object": label},
+        )
         _log.warning("Skipping corrupted %s at %s: %s", label, path, exc)
         return None
 
@@ -267,6 +272,7 @@ def _load_json_file(path: Path, label: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 
+@_telemetry.instrument_storage("save", "profile")
 def save_profile(
     profile: Profile,
     model_id: str,
@@ -288,6 +294,7 @@ def save_profile(
     return path
 
 
+@_telemetry.instrument_storage("load", "profile")
 def load_profiles(
     model_id: str,
     limit: int | None = None,
@@ -322,6 +329,7 @@ def load_profiles(
     return results
 
 
+@_telemetry.instrument_storage("save", "baseline")
 def save_baseline(profile: Profile, model_id: str) -> Path:
     """Persist a baseline Profile as JSON under ~/.modelsentry/{model_id}/baseline.json.
 
@@ -340,6 +348,7 @@ def save_baseline(profile: Profile, model_id: str) -> Path:
     return path
 
 
+@_telemetry.instrument_storage("load", "baseline")
 def load_baseline(model_id: str) -> Profile | None:
     """Load the baseline Profile for a model.
 
@@ -362,6 +371,7 @@ def load_baseline(model_id: str) -> Profile | None:
         return None
 
 
+@_telemetry.instrument_storage("save", "drift_report")
 def save_drift_report(
     report: DriftReport,
     model_id: str,
@@ -390,6 +400,7 @@ def save_drift_report(
     return path
 
 
+@_telemetry.instrument_storage("load", "drift_report")
 def load_drift_reports(
     model_id: str,
     limit: int | None = None,
@@ -424,6 +435,7 @@ def load_drift_reports(
     return results
 
 
+@_telemetry.instrument_storage("load", "drift_report")
 def load_drift_reports_with_timestamps(
     model_id: str,
     limit: int | None = None,
@@ -470,6 +482,7 @@ def load_drift_reports_with_timestamps(
     return results
 
 
+@_telemetry.instrument_storage("count", "profile")
 def get_prediction_count(model_id: str) -> int:
     """Return the total number of predictions monitored for a model.
 
@@ -507,6 +520,7 @@ def get_prediction_count(model_id: str) -> int:
     return total
 
 
+@_telemetry.instrument_storage("list", "model")
 def list_models() -> list[str]:
     """Return all model_ids that have a directory under STORAGE_ROOT.
 
@@ -538,6 +552,7 @@ def set_alert_callback(
     _alert_callback = callback
 
 
+@_telemetry.instrument_storage("load", "timestamp")
 def get_last_updated(model_id: str) -> datetime | None:
     """Return the most recent mtime across profiles/ and drift_reports/ for a model.
 

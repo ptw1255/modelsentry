@@ -6,12 +6,14 @@ into a per-model buffer, and once the buffer reaches ``profile_window`` calls,
 profile computation runs on a daemon worker thread off the predict critical
 path. Monitoring failures never affect the wrapped function's return value.
 """
+
 from __future__ import annotations
 
 import asyncio
 import functools
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,6 +23,7 @@ import numpy as np
 import pandas as pd
 
 import modelsentry.storage as _storage
+from modelsentry import telemetry as _telemetry
 from modelsentry.profiler import Profile, profile
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -37,12 +40,15 @@ class _SdkConfig:
     profile_handler: ProfileHandler
     logger: logging.Logger
     storage_path: Path | None
+    telemetry_include_model_id: bool
 
 
 @dataclass
 class _BufferedCall:
     features: object
     predictions: object
+    context: object = None
+    enqueued_at: float = field(default_factory=time.perf_counter)
 
 
 _config: _SdkConfig | None = None
@@ -61,6 +67,7 @@ def init(
     profile_handler: ProfileHandler | None = None,
     storage_path: Path | str | None = None,
     logger: logging.Logger | None = None,
+    telemetry_include_model_id: bool = False,
 ) -> None:
     """Initialize the ModelSentry SDK.
 
@@ -78,6 +85,8 @@ def init(
         storage_path: Directory for profile storage. Defaults to ~/.modelsentry/.
             Override for testing or custom storage locations.
         logger: Custom logger; defaults to logging.getLogger("modelsentry").
+        telemetry_include_model_id: Explicitly include model_id on spans. Model
+            IDs are never emitted as metric attributes. Defaults to False.
     """
     if profile_window < 1:
         raise ValueError(f"profile_window must be >= 1, got {profile_window}")
@@ -85,10 +94,14 @@ def init(
     if _executor is not None:
         shutdown()
     log = logger or logging.getLogger("modelsentry")
-    resolved_path: Path | None = Path(storage_path) if storage_path is not None else None
+    resolved_path: Path | None = (
+        Path(storage_path) if storage_path is not None else None
+    )
     if resolved_path is not None:
         _storage.STORAGE_ROOT = resolved_path
-    handler = profile_handler if profile_handler is not None else _default_storage_handler
+    handler = (
+        profile_handler if profile_handler is not None else _default_storage_handler
+    )
     _config = _SdkConfig(
         api_key=api_key,
         model_id=model_id,
@@ -96,6 +109,7 @@ def init(
         profile_handler=handler,
         logger=log,
         storage_path=resolved_path,
+        telemetry_include_model_id=telemetry_include_model_id,
     )
     _executor = ThreadPoolExecutor(
         max_workers=1, thread_name_prefix="modelsentry-worker"
@@ -203,6 +217,7 @@ def _safe_capture(
 ) -> None:
     """Run capture under a blanket try/except so monitoring never raises."""
     global _uninit_warning_emitted
+    started = time.perf_counter()
     try:
         if _config is None:
             if not _uninit_warning_emitted:
@@ -212,15 +227,66 @@ def _safe_capture(
                 _uninit_warning_emitted = True
             return
         mid = override_model_id or _config.model_id
-        features = _extract_features(args, kwargs)
-        if features is None:
-            return
-        _capture_call(mid, features, result)
+        attrs = {
+            "modelsentry.operation": "capture",
+            "modelsentry.outcome": "success",
+            "modelsentry.profile_window": _config.profile_window,
+        }
+        attrs.update(
+            _telemetry.model_attributes(
+                mid, explicit=_config.telemetry_include_model_id
+            )
+        )
+        with _telemetry.span("modelsentry.capture", attrs) as current:
+            try:
+                features = _extract_features(args, kwargs)
+                if features is None:
+                    _telemetry.set_attributes(
+                        current,
+                        {
+                            "modelsentry.outcome": "skipped",
+                            "modelsentry.skip_reason": "features_unavailable",
+                        },
+                    )
+                    _telemetry.record_counter(
+                        "modelsentry.capture.count",
+                        attributes={
+                            "outcome": "skipped",
+                            "reason": "features_unavailable",
+                        },
+                    )
+                    _telemetry.record_counter(
+                        "modelsentry.capture.skipped",
+                        attributes={"reason": "features_unavailable"},
+                    )
+                    return
+                batch_submitted = _capture_call(
+                    mid, features, result, _telemetry.current_context()
+                )
+                _telemetry.set_attributes(
+                    current, {"modelsentry.batch.submitted": batch_submitted}
+                )
+                _telemetry.record_counter(
+                    "modelsentry.capture.count", attributes={"outcome": "success"}
+                )
+            except Exception as exc:
+                _telemetry.record_error(current, exc, stage="capture")
+                _telemetry.record_counter(
+                    "modelsentry.capture.count", attributes={"outcome": "error"}
+                )
+                _telemetry.record_counter("modelsentry.capture.errors")
+                _config.logger.exception("modelsentry: capture failed (non-fatal)")
     except Exception:
         if _config is not None:
-            _config.logger.exception(
-                "modelsentry: capture failed (non-fatal)"
-            )
+            _config.logger.exception("modelsentry: capture failed (non-fatal)")
+        _telemetry.record_counter(
+            "modelsentry.capture.count", attributes={"outcome": "error"}
+        )
+        _telemetry.record_counter("modelsentry.capture.errors")
+    finally:
+        _telemetry.record_duration(
+            "modelsentry.capture.duration", (time.perf_counter() - started) * 1000
+        )
 
 
 def _extract_features(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
@@ -233,43 +299,125 @@ def _extract_features(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
     return None
 
 
-def _capture_call(model_id: str, features: object, predictions: object) -> None:
+def _capture_call(
+    model_id: str,
+    features: object,
+    predictions: object,
+    context: object = None,
+) -> bool:
     """Append to per-model buffer; submit batch to worker when full."""
     assert _config is not None
     assert _executor is not None
     batch_to_profile: list[_BufferedCall] | None = None
+    buffer_size = 0
     with _buffer_lock:
         buf = _buffers.setdefault(model_id, [])
-        buf.append(_BufferedCall(features, predictions))
+        buf.append(_BufferedCall(features, predictions, context=context))
         if len(buf) >= _config.profile_window:
             batch_to_profile = buf
             _buffers[model_id] = []
+        buffer_size = len(_buffers.get(model_id, []))
+    _telemetry.record_value(
+        "modelsentry.buffer.size", buffer_size, attributes={"outcome": "buffered"}
+    )
     if batch_to_profile is not None:
         _executor.submit(_compute_and_dispatch, batch_to_profile, model_id)
+        _telemetry.record_counter(
+            "modelsentry.batch.submitted", attributes={"outcome": "submitted"}
+        )
+        return True
+    return False
 
 
-def _compute_and_dispatch(
-    batch: list[_BufferedCall], model_id: str
-) -> None:
+def _compute_and_dispatch(batch: list[_BufferedCall], model_id: str) -> None:
     """Worker-thread function: coerce inputs, profile, dispatch handler."""
     if _config is None:
         return
-    try:
-        df = _coerce_features([c.features for c in batch])
-        preds = _coerce_predictions([c.predictions for c in batch])
-        prof = profile(df, preds)
-        _latest_profiles[model_id] = prof
-    except Exception:
-        _config.logger.exception(
-            "modelsentry: profile computation failed for model_id=%s", model_id
+    config = _config
+    contexts = [c.context for c in batch]
+    queue_delay_ms = max(
+        0.0,
+        (
+            time.perf_counter()
+            - min((c.enqueued_at for c in batch), default=time.perf_counter())
         )
-        return
-    try:
-        _config.profile_handler(prof, model_id)
-    except Exception:
-        _config.logger.exception(
-            "modelsentry: profile_handler raised for model_id=%s", model_id
+        * 1000,
+    )
+    profile_attrs = {
+        "modelsentry.operation": "profile",
+        "modelsentry.batch.size": len(batch),
+        "modelsentry.queue.delay_ms": queue_delay_ms,
+    }
+    profile_attrs.update(
+        _telemetry.model_attributes(
+            model_id, explicit=config.telemetry_include_model_id
         )
+    )
+    started = time.perf_counter()
+    with _telemetry.span(
+        "modelsentry.profile", profile_attrs, links=_telemetry.span_links(contexts)
+    ) as current:
+        try:
+            df = _coerce_features([c.features for c in batch])
+            preds = _coerce_predictions([c.predictions for c in batch])
+            prof = profile(df, preds)
+            _latest_profiles[model_id] = prof
+            _telemetry.set_attributes(
+                current,
+                {
+                    "modelsentry.outcome": "success",
+                    "modelsentry.profile.row_count": prof.n_rows,
+                    "modelsentry.profile.feature_count": len(prof.feature_profiles),
+                    "modelsentry.profile.task_type": prof.prediction_profile.task_type,
+                },
+            )
+            _telemetry.record_counter(
+                "modelsentry.profile.count",
+                attributes={
+                    "outcome": "success",
+                    "task_type": prof.prediction_profile.task_type,
+                },
+            )
+        except Exception as exc:
+            _telemetry.record_error(current, exc, stage="profile")
+            _telemetry.record_counter(
+                "modelsentry.profile.count", attributes={"outcome": "error"}
+            )
+            _telemetry.record_counter("modelsentry.profile.errors")
+            config.logger.exception(
+                "modelsentry: profile computation failed (non-fatal)"
+            )
+            return
+        finally:
+            _telemetry.record_duration(
+                "modelsentry.profile.duration", (time.perf_counter() - started) * 1000
+            )
+    handler_started = time.perf_counter()
+    handler_attrs = {"modelsentry.operation": "profile_handler"}
+    handler_attrs.update(
+        _telemetry.model_attributes(
+            model_id, explicit=config.telemetry_include_model_id
+        )
+    )
+    with _telemetry.span("modelsentry.profile_handler", handler_attrs) as current:
+        try:
+            config.profile_handler(prof, model_id)
+            _telemetry.set_attributes(current, {"modelsentry.outcome": "success"})
+            _telemetry.record_counter(
+                "modelsentry.profile_handler.count", attributes={"outcome": "success"}
+            )
+        except Exception as exc:
+            _telemetry.record_error(current, exc, stage="profile_handler")
+            _telemetry.record_counter(
+                "modelsentry.profile_handler.count", attributes={"outcome": "error"}
+            )
+            _telemetry.record_counter("modelsentry.profile_handler.errors")
+            config.logger.exception("modelsentry: profile_handler raised (non-fatal)")
+        finally:
+            _telemetry.record_duration(
+                "modelsentry.profile_handler.duration",
+                (time.perf_counter() - handler_started) * 1000,
+            )
 
 
 def _coerce_features(features_list: list[object]) -> pd.DataFrame:

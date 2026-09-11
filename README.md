@@ -103,6 +103,25 @@ transmitted over a network, and never seen by ModelSentry.
 This is a design constraint, not just a policy — the architecture makes
 raw data transmission impossible.
 
+## Optional OpenTelemetry instrumentation
+
+Install `modelsentry[otel]` to emit vendor-neutral OTLP traces and metrics from
+ModelSentry-owned work: post-prediction capture/buffering, worker queue delay,
+profile computation and handlers, persistence, drift detection, alerts, and
+FastAPI dashboard requests. The customer prediction function itself is not
+wrapped or measured. ModelSentry uses active providers; standalone CLI setup
+reads standard `OTEL_*` variables. It is disabled with
+`MODELSENTRY_OTEL_ENABLED=false`.
+
+Signals contain only bounded counts, durations, operation/outcome, task type,
+severity, and route templates. Raw features/predictions, feature names,
+profiles/reports, request bodies, email addresses, credentials, filesystem
+paths, and exception messages are never emitted. Model IDs are absent by
+default and can be explicitly opted into with
+`MODELSENTRY_OTEL_INCLUDE_MODEL_ID=true` or `ms.init(...,
+telemetry_include_model_id=True)`; they are never metric attributes. See
+`sdk/README.md` for the code path and verification procedure.
+
 ---
 
 ## Who this is for

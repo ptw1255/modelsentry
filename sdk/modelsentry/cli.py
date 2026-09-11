@@ -15,6 +15,7 @@ import uvicorn
 from modelsentry import __version__
 from modelsentry.alerts import AlertConfig
 from modelsentry.server import HOST, DEFAULT_PORT, create_app
+from modelsentry.telemetry import configure_telemetry, shutdown_telemetry
 
 
 def _open_browser(url: str) -> None:
@@ -110,11 +111,19 @@ def serve(
         click.echo(f"  Alerts →     {alert_email} via {smtp_host}:{smtp_port}")
 
     click.echo("\n  Press Ctrl+C to stop.\n")
+    try:
+        configure_telemetry()
+    except Exception:
+        pass
     threading.Timer(1.5, _open_browser, [url]).start()
     app = create_app(alert_config=alert_config)
     try:
         uvicorn.run(app, host=HOST, port=port, log_level="warning")
     except KeyboardInterrupt:
+        pass
+    try:
+        shutdown_telemetry()
+    except Exception:
         pass
     click.echo("\nModelSentry stopped.")
     sys.exit(0)

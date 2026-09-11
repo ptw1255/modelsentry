@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from modelsentry import storage
+from modelsentry import telemetry as _telemetry
 from modelsentry.alerts import AlertConfig, send_drift_alert
 from modelsentry.drift import DriftReport
 
@@ -333,6 +334,7 @@ def create_app(
         storage.set_alert_callback(None)
 
     app = FastAPI(title="ModelSentry Local Dashboard", version="0.1.0")
+    _telemetry.instrument_fastapi(app)
 
     @app.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
