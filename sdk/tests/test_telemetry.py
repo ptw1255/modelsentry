@@ -100,6 +100,8 @@ def test_real_span_does_not_record_exception_message(monkeypatch):
 
 
 def test_span_links_are_bounded(monkeypatch):
+    pytest.importorskip("opentelemetry.trace")
+
     class SpanContext:
         def __init__(self, value):
             self.trace_id = value
